@@ -14,6 +14,10 @@ const EXT_MAP: Partial<Record<VbComponentType, string>> = {
 
 let bridge: BridgeClient | undefined;
 
+// Tracks the active mirror folder in this window so deactivate() can clean it up.
+// Only set when this window was opened as a .bassync workspace.
+let activeMirrorFolder: string | undefined;
+
 function getBridge(): BridgeClient {
   if (!bridge) bridge = new PowerShellBridge();
   return bridge;
@@ -133,6 +137,9 @@ function setupMirrorWatcher(context: vscode.ExtensionContext, mirrorFolder: stri
     return; // not a valid bassync workspace
   }
 
+  // Register this folder for cleanup on window close.
+  activeMirrorFolder = mirrorFolder;
+
   const workbook: WorkbookRef = {
     fullName: manifest.workbookFullName,
     name: manifest.workbookName,
@@ -197,4 +204,37 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   bridge?.dispose();
   bridge = undefined;
+  deleteMirrorFolder();
+}
+
+/**
+ * Deletes the .bassync mirror folder when the window closes.
+ *
+ * SAFETY: this only ever deletes the temporary text-file mirror on disk.
+ * The actual VBA code lives inside Excel's in-memory VBProject and inside the
+ * vbaProject.bin within the .xlsm ZIP — neither of which this extension ever
+ * modifies directly. Deleting the mirror folder cannot remove code from Excel
+ * or from the workbook file.
+ *
+ * Two hard guards before any deletion:
+ *   1. The folder path must end with ".bassync"
+ *   2. The folder must contain a manifest.json written by this extension
+ */
+function deleteMirrorFolder(): void {
+  const folder = activeMirrorFolder;
+  activeMirrorFolder = undefined;
+  if (!folder) return;
+
+  // Guard 1 — must look like a bassync mirror folder.
+  if (!folder.endsWith('.bassync')) return;
+
+  // Guard 2 — must contain the manifest this extension wrote.
+  const manifestPath = path.join(folder, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) return;
+
+  try {
+    fs.rmSync(folder, { recursive: true, force: true });
+  } catch {
+    // Best-effort: ignore errors (e.g. folder already deleted, permissions).
+  }
 }
