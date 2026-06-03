@@ -114,6 +114,26 @@ export class WinaxBridge implements BridgeClient {
     code.AddFromString(source);
   }
 
+  async addComponent(workbook: WorkbookRef, componentName: string, vbType: number, source: string): Promise<void> {
+    const wb = this.resolveWorkbook(workbook);
+    const component = wb.VBProject.VBComponents.Add(vbType);
+    component.Name = componentName;
+    const code = component.CodeModule;
+    const lineCount: number = Number(code.CountOfLines);
+    if (lineCount > 0) code.DeleteLines(1, lineCount);
+    if (source.trim()) code.AddFromString(source);
+    wb.Save();
+  }
+
+  async removeComponent(workbook: WorkbookRef, componentName: string): Promise<void> {
+    const wb = this.resolveWorkbook(workbook);
+    try {
+      const component = wb.VBProject.VBComponents.Item(componentName);
+      wb.VBProject.VBComponents.Remove(component);
+      wb.Save();
+    } catch { /* component may not exist */ }
+  }
+
   dispose(): void {
     this.excelInstances.clear();
   }

@@ -165,6 +165,43 @@ export class PowerShellBridge implements BridgeClient {
     }
   }
 
+  async addComponent(workbook: WorkbookRef, componentName: string, vbType: number, source: string): Promise<void> {
+    const tmpFile = path.join(os.tmpdir(), `bassync_${Date.now()}.tmp`);
+    fs.writeFileSync(tmpFile, source, 'utf8');
+    try {
+      const script = `
+        [Console]::OutputEncoding = [Text.Encoding]::UTF8
+        ${WB_RESOLVER_PS(workbook.fullName)}
+        $newSource = [IO.File]::ReadAllText('${escPS(tmpFile)}', [Text.Encoding]::UTF8)
+        $c = $_wb.VBProject.VBComponents.Add(${vbType})
+        $c.Name = '${escPS(componentName)}'
+        $m = $c.CodeModule
+        if ($m.CountOfLines -gt 0) { $m.DeleteLines(1, $m.CountOfLines) }
+        if ($newSource.Trim() -ne '') { $m.AddFromString($newSource) }
+        $_wb.Save()
+        Write-Output 'ok'
+      `;
+      await runPS(script);
+    } finally {
+      try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+    }
+  }
+
+  async removeComponent(workbook: WorkbookRef, componentName: string): Promise<void> {
+    const script = `
+      [Console]::OutputEncoding = [Text.Encoding]::UTF8
+      ${WB_RESOLVER_PS(workbook.fullName)}
+      $c = $null
+      try { $c = $_wb.VBProject.VBComponents.Item('${escPS(componentName)}') } catch {}
+      if ($c) {
+        $_wb.VBProject.VBComponents.Remove($c)
+        $_wb.Save()
+      }
+      Write-Output 'ok'
+    `;
+    await runPS(script);
+  }
+
   dispose(): void {
     // No persistent resources; each runPS call is a fresh process.
   }

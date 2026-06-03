@@ -24,6 +24,10 @@ export interface BridgeClient {
   listComponents(workbook: WorkbookRef): Promise<VbComponentInfo[]>;
   getComponentSource(workbook: WorkbookRef, componentName: string): Promise<string>;
   setComponentSource(workbook: WorkbookRef, componentName: string, source: string): Promise<void>;
+  /** Add a brand-new VBA component (vbType 1=StdModule, 2=ClassModule) and save the workbook. */
+  addComponent(workbook: WorkbookRef, componentName: string, vbType: number, source: string): Promise<void>;
+  /** Remove a VBA component by name and save the workbook. */
+  removeComponent(workbook: WorkbookRef, componentName: string): Promise<void>;
   dispose(): void;
 }
 

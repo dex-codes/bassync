@@ -12,6 +12,11 @@ const EXT_MAP: Partial<Record<VbComponentType, string>> = {
   Document: '.cls',
 };
 
+// VBA component type numbers for newly created files.
+// .bas → StdModule (1), .cls → ClassModule (2).
+// Document modules (ThisWorkbook, sheets) can't be created by the user — Excel owns those.
+const NEW_VB_TYPE: Record<string, number> = { '.bas': 1, '.cls': 2 };
+
 let bridge: BridgeClient | undefined;
 
 // Tracks the active mirror folder in this window so deactivate() can clean it up.
@@ -153,37 +158,72 @@ function setupMirrorWatcher(context: vscode.ExtensionContext, mirrorFolder: stri
   statusBar.show();
   context.subscriptions.push(statusBar);
 
+  // Helper: run a bridge action with status bar feedback.
+  async function withStatus(verb: string, componentName: string, fn: () => Promise<void>): Promise<void> {
+    statusBar.text = `$(sync~spin) Bassync: ${verb} ${componentName}…`;
+    try {
+      await fn();
+      statusBar.text = `$(check) Bassync: ${manifest.workbookName}`;
+      vscode.window.setStatusBarMessage(`Bassync: ${verb} ${componentName} in Excel ✓`, 3000);
+    } catch (err) {
+      statusBar.text = `$(error) Bassync: ${manifest.workbookName}`;
+      vscode.window.showErrorMessage(
+        `Bassync: failed to ${verb} "${componentName}" — ${(err as Error).message}`
+      );
+    } finally {
+      setTimeout(() => {
+        if (statusBar.text.startsWith('$(check)')) {
+          statusBar.text = `$(sync) Bassync: ${manifest.workbookName}`;
+        }
+      }, 3000);
+    }
+  }
+
+  // ── Push on save ──────────────────────────────────────────────────────────
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(async (doc) => {
       const filePath = doc.uri.fsPath;
-      // Only handle files inside this mirror folder.
       if (!filePath.startsWith(mirrorFolder + path.sep)) return;
-
       const ext = path.extname(filePath);
       if (ext !== '.bas' && ext !== '.cls') return;
-
       const componentName = path.basename(filePath, ext);
-      statusBar.text = `$(sync~spin) Bassync: pushing ${componentName}…`;
-
-      try {
-        await getBridge().setComponentSource(workbook, componentName, doc.getText());
-        statusBar.text = `$(check) Bassync: ${manifest.workbookName}`;
-        vscode.window.setStatusBarMessage(`Bassync: pushed ${componentName} to Excel ✓`, 3000);
-      } catch (err) {
-        statusBar.text = `$(error) Bassync: ${manifest.workbookName}`;
-        vscode.window.showErrorMessage(
-          `Bassync: failed to push "${componentName}" — ${(err as Error).message}`
-        );
-      } finally {
-        // Reset icon after a moment if no error replaced it.
-        setTimeout(() => {
-          if (statusBar.text.startsWith('$(check)')) {
-            statusBar.text = `$(sync) Bassync: ${manifest.workbookName}`;
-          }
-        }, 3000);
-      }
+      await withStatus('pushing', componentName, () =>
+        getBridge().setComponentSource(workbook, componentName, doc.getText())
+      );
     })
   );
+
+  // ── File system watcher for create / delete ───────────────────────────────
+  const fsWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(mirrorFolder, '*.{bas,cls}')
+  );
+  context.subscriptions.push(fsWatcher);
+
+  // New file → add component to Excel and save workbook.
+  fsWatcher.onDidCreate(async (uri) => {
+    const filePath = uri.fsPath;
+    const ext = path.extname(filePath);
+    const vbType = NEW_VB_TYPE[ext];
+    if (!vbType) return;
+    const componentName = path.basename(filePath, ext);
+    // Read initial content — may be empty when first created; that's fine.
+    let source = '';
+    try { source = fs.readFileSync(filePath, 'utf8'); } catch { /* empty file */ }
+    await withStatus('adding', componentName, () =>
+      getBridge().addComponent(workbook, componentName, vbType, source)
+    );
+  });
+
+  // Deleted file → remove component from Excel and save workbook.
+  fsWatcher.onDidDelete(async (uri) => {
+    const filePath = uri.fsPath;
+    const ext = path.extname(filePath);
+    if (ext !== '.bas' && ext !== '.cls') return;
+    const componentName = path.basename(filePath, ext);
+    await withStatus('removing', componentName, () =>
+      getBridge().removeComponent(workbook, componentName)
+    );
+  });
 }
 
 export function activate(context: vscode.ExtensionContext): void {
