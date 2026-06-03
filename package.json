@@ -12,6 +12,7 @@
     "type": "git",
     "url": "https://github.com/bassync/bassync"
   },
+  "icon": "images/icon.png",
   "categories": [
     "Other"
   ],
