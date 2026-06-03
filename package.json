@@ -1,0 +1,52 @@
+{
+  "name": "bassync",
+  "displayName": "Bassync",
+  "description": "Edit VBA in xlsm workbooks from VSCode by syncing live with a running Excel instance.",
+  "version": "0.0.1",
+  "publisher": "bassync",
+  "private": true,
+  "engines": {
+    "vscode": "^1.120.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bassync/bassync"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "bassync.listOpenWorkbooks",
+        "title": "Bassync: List Open Workbooks",
+        "category": "Bassync"
+      },
+      {
+        "command": "bassync.attachToWorkbook",
+        "title": "Bassync: Attach to Workbook…",
+        "category": "Bassync"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "compile": "tsc -p ./ --noEmit",
+    "rebuild-native": "electron-rebuild -f -w winax -v 39.2.3",
+    "install-ext": "node esbuild.js --production && npx vsce package --no-dependencies --skip-license && code --install-extension bassync-0.0.1.vsix"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.2",
+    "@types/node": "^20.19.41",
+    "@types/vscode": "^1.120.0",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "winax": "^3.6.9"
+  }
+}
