@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { PowerShellBridge } from './bridge/PowerShellBridge';
+import { PowerShellBridge, getRibbonXml, setRibbonXml, RIBBON_TEMPLATE } from './bridge/PowerShellBridge';
 import type { BassyncManifest, BridgeClient, VbComponentType, WorkbookRef } from './bridge/types';
 
 // File extension for each VBA component type.
@@ -104,9 +104,20 @@ async function attachToWorkbookCommand(): Promise<void> {
         written++;
       }
 
+      // Pull ribbon XML from inside the .xlsm ZIP.
+      progress.report({ message: 'Pulling ribbon XML…' });
+      const ribbonDir = path.join(outDir, 'ribbon');
+      fs.mkdirSync(ribbonDir, { recursive: true });
+      const existingRibbonXml = await getRibbonXml(workbook.fullName);
+      fs.writeFileSync(
+        path.join(ribbonDir, 'customUI14.xml'),
+        existingRibbonXml || RIBBON_TEMPLATE,
+        'utf8'
+      );
+
       // Brief summary shown in the notification before it auto-dismisses.
       const skipMsg = skipped > 0 ? ` (${skipped} form/designer skipped)` : '';
-      progress.report({ message: `Done — ${written} file(s) written${skipMsg}` });
+      progress.report({ message: `Done — ${written} VBA file(s) + ribbon XML written${skipMsg}` });
 
       // Open the mirror folder as a NEW VSCode window.
       const folderUri = vscode.Uri.file(outDir);
@@ -179,11 +190,42 @@ function setupMirrorWatcher(context: vscode.ExtensionContext, mirrorFolder: stri
     }
   }
 
+  const ribbonFile = path.join(mirrorFolder, 'ribbon', 'customUI14.xml');
+
   // ── Push on save ──────────────────────────────────────────────────────────
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(async (doc) => {
       const filePath = doc.uri.fsPath;
       if (!filePath.startsWith(mirrorFolder + path.sep)) return;
+
+      // ── Ribbon XML ──
+      if (filePath === ribbonFile) {
+        // Ribbon changes require Excel to close + reopen the workbook, so use
+        // a prominent progress notification rather than the status bar alone.
+        await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: 'Bassync: updating ribbon XML…',
+            cancellable: false,
+          },
+          async (progress) => {
+            progress.report({ message: 'Saving and briefly reloading workbook in Excel…' });
+            try {
+              await setRibbonXml(manifest.workbookFullName, doc.getText());
+              progress.report({ message: 'Done — ribbon applied on workbook reload ✓' });
+              // Give the user a moment to read the confirmation.
+              await new Promise((r) => setTimeout(r, 1500));
+            } catch (err) {
+              vscode.window.showErrorMessage(
+                `Bassync: ribbon update failed — ${(err as Error).message}`
+              );
+            }
+          }
+        );
+        return;
+      }
+
+      // ── VBA component ──
       const ext = path.extname(filePath);
       if (ext !== '.bas' && ext !== '.cls') return;
       const componentName = path.basename(filePath, ext);

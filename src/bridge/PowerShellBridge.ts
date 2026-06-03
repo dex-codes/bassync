@@ -206,3 +206,138 @@ export class PowerShellBridge implements BridgeClient {
     // No persistent resources; each runPS call is a fresh process.
   }
 }
+
+// ── Ribbon XML helpers ────────────────────────────────────────────────────────
+// These work directly on the .xlsm ZIP and do not go through COM.
+// They are standalone exports so extension.ts can call them without a
+// BridgeClient instance (ribbon is file-based, not VBProject-based).
+
+export const RIBBON_TEMPLATE = `<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui">
+  <ribbon>
+    <tabs>
+      <tab id="customTab" label="Custom">
+        <group id="customGroup" label="Actions">
+          <!-- Add ribbon controls here -->
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>`;
+
+/**
+ * Read the ribbon customUI XML from inside the .xlsm ZIP.
+ * Returns an empty string if no customUI is defined.
+ * Safe to call while Excel has the workbook open.
+ */
+export async function getRibbonXml(xlsmPath: string): Promise<string> {
+  const script = `
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    Add-Type -Assembly 'System.IO.Compression' -ErrorAction SilentlyContinue
+    Add-Type -Assembly 'System.IO.Compression.FileSystem' -ErrorAction SilentlyContinue
+    try {
+      $z = [IO.Compression.ZipFile]::OpenRead('${escPS(xlsmPath)}')
+      $e = $z.Entries | Where-Object {
+        $_.FullName -eq 'customUI14/customUI14.xml' -or $_.FullName -eq 'customUI/customUI.xml'
+      } | Select-Object -First 1
+      if ($e) {
+        $r = [IO.StreamReader]::new($e.Open(), [Text.Encoding]::UTF8)
+        $c = $r.ReadToEnd(); $r.Close(); $z.Dispose(); Write-Output $c
+      } else { $z.Dispose(); Write-Output '' }
+    } catch { Write-Output '' }
+  `;
+  return await runPS(script);
+}
+
+/**
+ * Write ribbon customUI XML back into the .xlsm ZIP.
+ *
+ * Because Excel locks the file while the workbook is open, this function:
+ *   1. Finds the workbook via the Running Object Table
+ *   2. Saves and closes it in Excel
+ *   3. Modifies the ZIP on disk (update or add customUI14/customUI14.xml
+ *      plus the _rels/.rels relationship entry if it did not exist before)
+ *   4. Reopens the workbook in Excel
+ *
+ * If the workbook is not currently open in Excel, steps 1/2/4 are skipped
+ * and the ZIP is modified directly.
+ */
+export async function setRibbonXml(xlsmPath: string, xml: string): Promise<void> {
+  const tmpFile = path.join(os.tmpdir(), `bassync_ribbon_${Date.now()}.tmp`);
+  fs.writeFileSync(tmpFile, xml, 'utf8');
+  try {
+    const script = `
+      [Console]::OutputEncoding = [Text.Encoding]::UTF8
+      Add-Type -Assembly 'System.IO.Compression' -ErrorAction SilentlyContinue
+      Add-Type -Assembly 'System.IO.Compression.FileSystem' -ErrorAction SilentlyContinue
+      ${ROT_HELPER_CS}
+
+      $r_path = '${escPS(xlsmPath)}'
+      $r_xml  = [IO.File]::ReadAllText('${escPS(tmpFile)}', [Text.Encoding]::UTF8)
+      $r_xl   = $null
+      $r_open = $false
+
+      # --- 1. Save + close in Excel if the workbook is currently open ----------
+      foreach ($r_app in [RotHelper]::GetExcelApps()) {
+        for ($r_i = 1; $r_i -le $r_app.Workbooks.Count; $r_i++) {
+          $r_wb = $r_app.Workbooks.Item($r_i)
+          if ($r_wb.FullName -eq $r_path) {
+            $r_xl   = $r_app
+            $r_wb.Save()
+            $r_wb.Close($false)
+            $r_open = $true
+            break
+          }
+        }
+        if ($r_open) { break }
+      }
+      if ($r_open) { Start-Sleep -Milliseconds 400 }
+
+      # --- 2. Modify the ZIP ---------------------------------------------------
+      $r_zip     = [IO.Compression.ZipFile]::Open($r_path, [IO.Compression.ZipArchiveMode]::Update)
+      $r_cuiPath = 'customUI14/customUI14.xml'
+      $r_prev    = $r_zip.Entries | Where-Object {
+        $_.FullName -eq 'customUI14/customUI14.xml' -or $_.FullName -eq 'customUI/customUI.xml'
+      } | Select-Object -First 1
+      $r_isNew = $false
+
+      if ($r_prev) {
+        $r_cuiPath = $r_prev.FullName
+        $r_prev.Delete()           # delete then recreate — only safe way to replace in-place
+      } else {
+        $r_isNew = $true
+      }
+
+      $r_entry  = $r_zip.CreateEntry($r_cuiPath)
+      $r_stream = $r_entry.Open()
+      $r_bytes  = [Text.Encoding]::UTF8.GetBytes($r_xml)
+      $r_stream.Write($r_bytes, 0, $r_bytes.Length)
+      $r_stream.Close()
+
+      # If this is brand-new ribbon XML, wire up the package relationship so Excel recognises it
+      if ($r_isNew) {
+        $r_relsEntry = $r_zip.Entries | Where-Object { $_.FullName -eq '_rels/.rels' } | Select-Object -First 1
+        if ($r_relsEntry) {
+          $r_reader  = [IO.StreamReader]::new($r_relsEntry.Open(), [Text.Encoding]::UTF8)
+          $r_relsXml = $r_reader.ReadToEnd(); $r_reader.Close()
+          if ($r_relsXml -notmatch 'ui/extensibility') {
+            $r_relId   = 'rId' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+            $r_relsXml = $r_relsXml -replace '</Relationships>',
+              "<Relationship Id=""$r_relId"" Type=""http://schemas.microsoft.com/office/2007/relationships/ui/extensibility"" Target=""$r_cuiPath""/></Relationships>"
+            $r_relsEntry.Delete()
+            $r_newRels = $r_zip.CreateEntry('_rels/.rels')
+            $r_rw = [IO.StreamWriter]::new($r_newRels.Open(), [Text.Encoding]::UTF8)
+            $r_rw.Write($r_relsXml); $r_rw.Close()
+          }
+        }
+      }
+      $r_zip.Dispose()
+
+      # --- 3. Reopen in Excel if it was open -----------------------------------
+      if ($r_open -and $r_xl) { $r_xl.Workbooks.Open($r_path) | Out-Null }
+      Write-Output 'ok'
+    `;
+    await runPS(script);
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+  }
+}
