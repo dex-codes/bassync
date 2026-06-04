@@ -2,9 +2,8 @@
   "name": "bassync",
   "displayName": "Bassync",
   "description": "Edit VBA in xlsm workbooks from VSCode by syncing live with a running Excel instance.",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "bassync",
-  "private": true,
   "engines": {
     "vscode": "^1.120.0"
   },
